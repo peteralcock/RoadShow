@@ -1,0 +1,373 @@
+// src/utils/config.ts
+/**
+ * Configuration management utility with schema validation,
+ * environment variable integration, and deep merging capabilities
+ */
+
+import fs from 'fs';
+import path from 'path';
+import { Logger } from './logger';
+
+/**
+ * Configuration manager with environment variable overrides
+ */
+export class Config {
+  private logger: Logger;
+  private config: any;
+  
+  /**
+   * Initialize configuration with defaults and optional file loading
+   * @param defaultConfig Default configuration object
+   * @param configPath Optional path to configuration file
+   */
+  constructor(defaultConfig: any = {}, configPath?: string) {
+    this.logger = new Logger('Config');
+    this.config = defaultConfig;
+    
+    // Load from file if specified
+    if (configPath) {
+      this.loadFromFile(configPath);
+    }
+    
+    // Apply environment variable overrides
+    this.applyEnvironmentOverrides();
+  }
+  
+  /**
+   * Load configuration from JSON file
+   * @param configPath Path to configuration file
+   * @returns True if successful, false otherwise
+   */
+  public loadFromFile(configPath: string): boolean {
+    try {
+      const resolvedPath = path.resolve(configPath);
+      
+      if (!fs.existsSync(resolvedPath)) {
+        this.logger.warn(`Configuration file not found: ${resolvedPath}`);
+        return false;
+      }
+      
+      const fileContent = fs.readFileSync(resolvedPath, 'utf8');
+      const fileConfig = JSON.parse(fileContent);
+      
+      // Deep merge with current config
+      this.config = this.deepMerge(this.config, fileConfig);
+      
+      this.logger.info(`Loaded configuration from ${resolvedPath}`);
+      return true;
+    } catch (error) {
+      this.logger.error('Failed to load configuration file', error);
+      return false;
+    }
+  }
+  
+  /**
+   * Apply environment variable overrides to configuration
+   * Format: APP_CONFIG_SECTION_KEY=value
+   */
+  private applyEnvironmentOverrides(): void {
+    const prefix = 'APP_CONFIG_';
+    
+    Object.keys(process.env)
+      .filter(key => key.startsWith(prefix))
+      .forEach(key => {
+        // Remove prefix and split into path parts
+        const configPath = key.substring(prefix.length).toLowerCase().split('_');
+        const value = process.env[key];
+        
+        if (value !== undefined) {
+          // Convert value to appropriate type
+          let typedValue: any = value;
+          
+          // Try to parse as number
+          if (/^-?\d+(\.\d+)?$/.test(value)) {
+            typedValue = parseFloat(value);
+          } 
+          // Parse as boolean
+          else if (value.toLowerCase() === 'true') {
+            typedValue = true;
+          }
+          else if (value.toLowerCase() === 'false') {
+            typedValue = false;
+          }
+          
+          // Set the value at the specified path
+          this.setNestedValue(this.config, configPath, typedValue);
+        }
+      });
+  }
+  
+  /**
+   * Set a value at a nested path in an object
+   * @param obj Target object
+   * @param path Array of keys forming the path
+   * @param value Value to set
+   */
+  private setNestedValue(obj: any, path: string[], value: any): void {
+    const lastKey = path.pop();
+    
+    if (!lastKey) return;
+    
+    let current = obj;
+    
+    // Navigate to the leaf object
+    for (const key of path) {
+      if (!(key in current)) {
+        current[key] = {};
+      }
+      current = current[key];
+    }
+    
+    // Set the value
+    current[lastKey] = value;
+  }
+  
+  /**
+   * Deep merge two objects
+   * @param target Target object
+   * @param source Source object
+   * @returns Merged object
+   */
+  private deepMerge(target: any, source: any): any {
+    // Handle null or undefined arguments
+    if (!target) return source;
+    if (!source) return target;
+    
+    // Create a new object to avoid modifying inputs
+    const result = { ...target };
+    
+    Object.keys(source).forEach(key => {
+      const targetValue = result[key];
+      const sourceValue = source[key];
+      
+      // Recursively merge objects
+      if (
+        targetValue && sourceValue &&
+        typeof targetValue === 'object' && typeof sourceValue === 'object' &&
+        !Array.isArray(targetValue) && !Array.isArray(sourceValue)
+      ) {
+        result[key] = this.deepMerge(targetValue, sourceValue);
+      } else {
+        // For arrays and primitives, source overwrites target
+        result[key] = sourceValue;
+      }
+    });
+    
+    return result;
+  }
+  
+  /**
+   * Validate configuration against a schema (if provided)
+   * @param schema Schema object (simple implementation)
+   * @returns Validation result
+   */
+  public validate(schema: any = null): { valid: boolean; errors: string[] } {
+    if (!schema) {
+      return { valid: true, errors: [] };
+    }
+    
+    const errors: string[] = [];
+    this.validateObject(this.config, schema, '', errors);
+    
+    return {
+      valid: errors.length === 0,
+      errors
+    };
+  }
+  
+  /**
+   * Recursively validate an object against a schema
+   * @param obj Object to validate
+   * @param schema Schema to validate against
+   * @param path Current path for error reporting
+   * @param errors Array to collect validation errors
+   */
+  private validateObject(obj: any, schema: any, path: string, errors: string[]): void {
+    // Check required fields
+    if (schema.required && Array.isArray(schema.required)) {
+      for (const field of schema.required) {
+        if (!(field in obj)) {
+          errors.push(`Missing required field: ${path ? `${path}.${field}` : field}`);
+        }
+      }
+    }
+    
+    // Check properties
+    if (schema.properties) {
+      for (const [key, propSchema] of Object.entries<any>(schema.properties)) {
+        const value = obj[key];
+        const fieldPath = path ? `${path}.${key}` : key;
+        
+        if (value === undefined) {
+          continue; // Skip validation for missing optional fields
+        }
+        
+        switch (propSchema.type) {
+          case 'object':
+            if (typeof value !== 'object' || Array.isArray(value)) {
+              errors.push(`${fieldPath} must be an object`);
+            } else if (propSchema.properties) {
+              this.validateObject(value, propSchema, fieldPath, errors);
+            }
+            break;
+            
+          case 'array':
+            if (!Array.isArray(value)) {
+              errors.push(`${fieldPath} must be an array`);
+            } else if (propSchema.items) {
+              value.forEach((item, index) => {
+                this.validateValue(item, propSchema.items, `${fieldPath}[${index}]`, errors);
+              });
+            }
+            break;
+            
+          default:
+            this.validateValue(value, propSchema, fieldPath, errors);
+            break;
+        }
+      }
+    }
+  }
+  
+  /**
+   * Validate a single value against a schema
+   * @param value Value to validate
+   * @param schema Schema to validate against
+   * @param path Current path for error reporting
+   * @param errors Array to collect validation errors
+   */
+  private validateValue(value: any, schema: any, path: string, errors: string[]): void {
+    // Type validation
+    if (schema.type) {
+      const jsType = typeof value;
+      
+      switch (schema.type) {
+        case 'string':
+          if (jsType !== 'string') {
+            errors.push(`${path} must be a string`);
+          } else if (schema.pattern) {
+            const regex = new RegExp(schema.pattern);
+            if (!regex.test(value)) {
+              errors.push(`${path} does not match pattern: ${schema.pattern}`);
+            }
+          }
+          break;
+          
+        case 'number':
+        case 'integer':
+          if (jsType !== 'number') {
+            errors.push(`${path} must be a number`);
+          } else if (schema.type === 'integer' && !Number.isInteger(value)) {
+            errors.push(`${path} must be an integer`);
+          }
+          
+          if (jsType === 'number') {
+            if (schema.minimum !== undefined && value < schema.minimum) {
+              errors.push(`${path} must be >= ${schema.minimum}`);
+            }
+            if (schema.maximum !== undefined && value > schema.maximum) {
+              errors.push(`${path} must be <= ${schema.maximum}`);
+            }
+          }
+          break;
+          
+        case 'boolean':
+          if (jsType !== 'boolean') {
+            errors.push(`${path} must be a boolean`);
+          }
+          break;
+          
+        case 'object':
+          if (jsType !== 'object' || Array.isArray(value)) {
+            errors.push(`${path} must be an object`);
+          } else if (schema.properties) {
+            this.validateObject(value, schema, path, errors);
+          }
+          break;
+          
+        case 'array':
+          if (!Array.isArray(value)) {
+            errors.push(`${path} must be an array`);
+          } else {
+            if (schema.minItems !== undefined && value.length < schema.minItems) {
+              errors.push(`${path} must have at least ${schema.minItems} items`);
+            }
+            if (schema.maxItems !== undefined && value.length > schema.maxItems) {
+              errors.push(`${path} must have at most ${schema.maxItems} items`);
+            }
+          }
+          break;
+      }
+    }
+    
+    // Enum validation
+    if (schema.enum && Array.isArray(schema.enum) && !schema.enum.includes(value)) {
+      errors.push(`${path} must be one of: ${schema.enum.join(', ')}`);
+    }
+  }
+  
+  /**
+   * Get a property from configuration with optional default value
+   * @param path Path to property (can be nested using dot notation)
+   * @param defaultValue Default value if property doesn't exist
+   * @returns Property value or default
+   */
+  public get<T>(path: string, defaultValue?: T): T {
+    const parts = path.split('.');
+    let current: any = this.config;
+    
+    for (const part of parts) {
+      if (current === undefined || current === null) {
+        return defaultValue as T;
+      }
+      current = current[part];
+    }
+    
+    return (current !== undefined && current !== null) ? current : defaultValue as T;
+  }
+  
+  /**
+   * Proxy handler for direct property access
+   */
+  /**
+   * Getter method for accessing config properties
+   * @param prop Property to access
+   * @returns Value of the property
+   */
+  public getConfig(prop: string): any {
+    return this.config[prop];
+  }
+
+  public get [Symbol.toStringTag](): string {
+    return 'Config';
+  }
+  
+  /**
+   * Allow direct property access to config values
+   * For TypeScript compatibility, properties should be declared in a type definition
+   */
+  [key: string]: any
+}
+
+// Proxy handler for Config to allow config.property syntax
+const configHandler: ProxyHandler<Config> = {
+  get(target: Config, prop: string | symbol) {
+    // Handle special properties and methods
+    if (typeof prop === 'symbol' || prop in target) {
+      return (target as any)[prop];
+    }
+    
+    // For string properties, get from the config
+    // Access the config property via a getter method that we add to the class
+    return target.getConfig(prop);
+  }
+};
+
+// Override the constructor to return a proxied instance
+const OriginalConfig = Config;
+// @ts-ignore - Overriding the constructor
+Config = function(...args: any[]) {
+  const instance = new OriginalConfig(...args);
+  return new Proxy(instance, configHandler);
+};
+Config.prototype = OriginalConfig.prototype;
