@@ -1,4 +1,5 @@
 # Craigslist Antique Scraper and Analyzer
+![Screenshot](antique.jpg?raw=true "RoadShow")
 
 An advanced application for systematically collecting antique listings from Craigslist, storing them in a structured SQLite database, and enriching each entry with AI-powered analysis for valuation, authenticity assessment, and historical context.
 
